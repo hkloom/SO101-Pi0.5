@@ -32,7 +32,8 @@ from transformers.models.paligemma.modeling_paligemma import PaliGemmaForConditi
 
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.constants import ACTION, OBS_STATE
-from lerobot.policies.normalize import Normalize, Unnormalize
+from lerobot.processor.normalize_processor import NormalizerProcessorStep as Normalize
+from lerobot.processor.normalize_processor import UnnormalizerProcessorStep as Unnormalize
 from lerobot.policies.pi0_openpi.configuration_pi0openpi import PI0OpenPIConfig
 from lerobot.policies.pretrained import PreTrainedPolicy, T
 

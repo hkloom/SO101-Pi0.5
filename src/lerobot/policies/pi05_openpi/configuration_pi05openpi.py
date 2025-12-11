@@ -43,8 +43,12 @@ class PI05OpenPIConfig(PreTrainedConfig):
     num_inference_steps: int = 10  # Number of denoising steps during inference
     time_sampling_beta_alpha: float = 1.5  # Beta distribution alpha parameter for time sampling
     time_sampling_beta_beta: float = 1.0  # Beta distribution beta parameter for time sampling
+    time_sampling_scale: float = 0.999  # Time sampling scale
+    time_sampling_offset: float = 0.001  # Time sampling offset
     min_period: float = 4e-3  # Min period for sinusoidal positional encoding
     max_period: float = 4.0  # Max period for sinusoidal positional encoding
+    rtc_config: dict | None = None  # RTC configuration
+    empty_cameras: int = 0  # Number of empty camera slots
 
     # Image preprocessing
     image_resolution: tuple[int, int] = (224, 224)  # see openpi `preprocessing_pytorch.py`
