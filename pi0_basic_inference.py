@@ -25,6 +25,7 @@ import numpy as np
 from lerobot.policies.factory import get_policy_class
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
+from lerobot.processor.pipeline import DataProcessorPipeline
 
 
 # Default task for lego picking
@@ -32,8 +33,45 @@ DEFAULT_TASK = "Pick up the red lego and place it on the paper plate."
 
 
 # =============================================================================
-# POLICY LOADING
+# POLICY AND PROCESSOR LOADING
 # =============================================================================
+
+def load_postprocessor(checkpoint_path: str, device: str = "cuda"):
+    """
+    Load the postprocessor pipeline that contains unnormalization stats.
+    
+    Args:
+        checkpoint_path: Path to checkpoint directory
+        device: Device to load to
+    
+    Returns:
+        Postprocessor pipeline, or None if not found
+    """
+    import os
+    postprocessor_json = os.path.join(checkpoint_path, "policy_postprocessor.json")
+    
+    if not os.path.exists(postprocessor_json):
+        print(f"  ⚠️  No policy_postprocessor.json found at {checkpoint_path}")
+        return None
+    
+    try:
+        postprocessor = DataProcessorPipeline.from_pretrained(
+            checkpoint_path,
+            config_filename="policy_postprocessor.json",
+            local_files_only=True,
+        )
+        print(f"  ✓ Loaded postprocessor from {checkpoint_path}")
+        
+        # Check if it has unnormalization stats
+        for step in postprocessor.steps:
+            if hasattr(step, '_tensor_stats') and step._tensor_stats:
+                print(f"    Stats loaded for: {list(step._tensor_stats.keys())}")
+        
+        return postprocessor
+    except Exception as e:
+        print(f"  ⚠️  Failed to load postprocessor: {e}")
+        return None
+
 
 def load_policy_from_checkpoint(checkpoint_path: str, device: str = "cuda"):
     """
@@ -259,6 +297,7 @@ def run_inference_loop(
     duration_s: float,
     fps: float,
     action_scale: float | None = None,
+    postprocessor=None,
 ) -> None:
     """
     Main control loop: observe -> predict -> execute.
@@ -287,10 +326,12 @@ def run_inference_loop(
     print(f"  Task: {task}")
     print(f"  Duration: {duration_s}s")
     print(f"  Target FPS: {fps}")
-    if action_scale is not None:
-        print(f"  Action scaling: {action_scale}x (manual override)")
+    if postprocessor is not None:
+        print(f"  Action unnormalization: ✓ Using postprocessor")
+    elif action_scale is not None:
+        print(f"  Action unnormalization: Manual scale {action_scale}x")
     else:
-        print(f"  Action scaling: Using policy's built-in unnormalization")
+        print(f"  Action unnormalization: ⚠️  NONE - actions may be wrong scale!")
     print(f"  Press Ctrl+C to stop")
     print(f"{'='*60}\n")
     
@@ -321,18 +362,33 @@ def run_inference_loop(
                 ):
                     action = policy.select_action(observation)
             
-            # 3. Execute action on robot
-            action_np = action.cpu().numpy().flatten()
+            # 3. Process and execute action on robot
+            action_raw = action.cpu().numpy().flatten()
             
-            # Apply manual action scaling if specified (workaround for missing stats)
-            if action_scale is not None:
-                action_np = action_np * action_scale
+            # Apply unnormalization via postprocessor if available
+            if postprocessor is not None:
+                # Postprocessor expects dict format
+                from lerobot.processor.core import PolicyAction
+                action_tensor = action.squeeze(0) if action.dim() > 1 else action
+                transition = {"action": PolicyAction(action_tensor)}
+                processed = postprocessor(transition)
+                action_np = processed["action"].cpu().numpy().flatten()
+                unnorm_method = "postprocessor"
+            elif action_scale is not None:
+                # Fallback: manual scaling
+                action_np = action_raw * action_scale
+                unnorm_method = f"manual scale {action_scale}x"
+            else:
+                # No unnormalization
+                action_np = action_raw
+                unnorm_method = "none (raw)"
             
             # Debug: print state and action on first few steps
             if step_count < 5:
                 print(f"\n--- Step {step_count} ---")
-                if action_scale is not None:
-                    print(f"  (Action scaled by {action_scale}x)")
+                print(f"  Unnormalization: {unnorm_method}")
+                print(f"  Raw action: {action_raw}")
+                print(f"  Processed action: {action_np}")
                 execute_action(robot, action_np, debug=True)
             else:
                 execute_action(robot, action_np, debug=False)
@@ -489,6 +545,10 @@ def main():
     # Load policy
     policy = load_policy_from_checkpoint(args.checkpoint, device=args.device)
     
+    # Load postprocessor (contains unnormalization stats)
+    print("\nLoading postprocessor...")
+    postprocessor = load_postprocessor(args.checkpoint, device=args.device)
+    
     # Open cameras
     print("\nOpening cameras...")
     image_hw = (args.image_height, args.image_width)
@@ -516,6 +576,7 @@ def main():
             duration_s=args.duration,
             fps=args.fps,
             action_scale=args.action_scale,
+            postprocessor=postprocessor,
         )
     finally:
         # Cleanup
