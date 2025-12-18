@@ -66,6 +66,12 @@ def load_postprocessor(checkpoint_path: str, device: str = "cuda"):
         for step in postprocessor.steps:
             if hasattr(step, '_tensor_stats') and step._tensor_stats:
                 print(f"    Stats loaded for: {list(step._tensor_stats.keys())}")
+                # Show action stats in detail
+                if 'action' in step._tensor_stats:
+                    action_stats = step._tensor_stats['action']
+                    print(f"    Action stats keys: {list(action_stats.keys())}")
+                    for stat_name, stat_val in action_stats.items():
+                        print(f"      {stat_name}: {stat_val.cpu().numpy()}")
         
         return postprocessor
     except Exception as e:
@@ -367,13 +373,34 @@ def run_inference_loop(
             
             # Apply unnormalization via postprocessor if available
             if postprocessor is not None:
-                # Postprocessor expects dict format
-                from lerobot.processor.core import PolicyAction
-                action_tensor = action.squeeze(0) if action.dim() > 1 else action
-                transition = {"action": PolicyAction(action_tensor)}
-                processed = postprocessor(transition)
-                action_np = processed["action"].cpu().numpy().flatten()
-                unnorm_method = "postprocessor"
+                # Find the unnormalizer step in the postprocessor
+                unnormalizer = None
+                for step in postprocessor.steps:
+                    if hasattr(step, '_tensor_stats') and 'action' in step._tensor_stats:
+                        unnormalizer = step
+                        break
+                
+                if unnormalizer is not None:
+                    # Get stats for action
+                    stats = unnormalizer._tensor_stats.get('action', {})
+                    if 'q01' in stats and 'q99' in stats:
+                        # Apply QUANTILES unnormalization: value * (q99 - q01) + q01
+                        q01 = stats['q01'].cpu().numpy()
+                        q99 = stats['q99'].cpu().numpy()
+                        action_np = action_raw * (q99 - q01) + q01
+                        unnorm_method = "postprocessor (QUANTILES)"
+                    elif 'mean' in stats and 'std' in stats:
+                        # Apply MEAN_STD unnormalization: value * std + mean
+                        mean = stats['mean'].cpu().numpy()
+                        std = stats['std'].cpu().numpy()
+                        action_np = action_raw * std + mean
+                        unnorm_method = "postprocessor (MEAN_STD)"
+                    else:
+                        action_np = action_raw
+                        unnorm_method = f"postprocessor (no matching stats, keys={list(stats.keys())})"
+                else:
+                    action_np = action_raw
+                    unnorm_method = "postprocessor (no unnormalizer step found)"
             elif action_scale is not None:
                 # Fallback: manual scaling
                 action_np = action_raw * action_scale
