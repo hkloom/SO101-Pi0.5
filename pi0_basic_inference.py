@@ -6,9 +6,10 @@ This script runs Pi0.5 policy inference with:
 - Live camera feeds (3 cameras)
 - Real robot state from SO-101 arm
 - Continuous control loop with action execution
+- Task/language instruction for the VLA model
 
 Usage:
-    python pi0_basic_inference.py --checkpoint ./pi05_fixed --duration 60
+    python pi0_basic_inference.py --checkpoint ./pi05_fixed --task "Pick up the red lego" --duration 60
 
 Hardware Setup:
     - Robot: SO-101 follower arm on /dev/ttyACM0
@@ -24,6 +25,10 @@ import numpy as np
 from lerobot.policies.factory import get_policy_class
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.robots.so101_follower import SO101Follower, SO101FollowerConfig
+
+
+# Default task for lego picking
+DEFAULT_TASK = "Pick up the red lego and place it on the paper plate."
 
 
 # =============================================================================
@@ -62,6 +67,25 @@ def load_policy_from_checkpoint(checkpoint_path: str, device: str = "cuda"):
     
     print(f"  Policy type: {policy_config.type}")
     print(f"  Device: {device}")
+    
+    # Debug: Check if normalization stats are loaded
+    if hasattr(policy, 'unnormalize_outputs'):
+        stats = policy.unnormalize_outputs._tensor_stats
+        if stats:
+            print(f"  ✓ Unnormalization stats loaded for: {list(stats.keys())}")
+            for key, stat_dict in stats.items():
+                print(f"    {key}: {list(stat_dict.keys())}")
+        else:
+            print(f"  ⚠️  WARNING: No unnormalization stats loaded!")
+            print(f"     Actions will NOT be denormalized properly.")
+            print(f"     Make sure model.safetensors contains 'unnormalize_outputs.*' keys.")
+    
+    if hasattr(policy, 'normalize_inputs'):
+        stats = policy.normalize_inputs._tensor_stats
+        if stats:
+            print(f"  ✓ Normalization stats loaded for: {list(stats.keys())}")
+        else:
+            print(f"  ⚠️  WARNING: No normalization stats loaded for inputs!")
     
     return policy
 
@@ -145,17 +169,34 @@ def get_robot_state(robot: SO101Follower) -> np.ndarray:
     return state
 
 
-def execute_action(robot: SO101Follower, action: np.ndarray) -> None:
+def execute_action(robot: SO101Follower, action: np.ndarray, debug: bool = False) -> dict:
     """
     Send action to the robot.
     
     Args:
         robot: Connected SO101Follower instance
         action: numpy array of shape (6,) with target joint positions
+        debug: If True, print debug info
+    
+    Returns:
+        The action dict that was actually sent (may be clipped)
     """
     motor_names = list(robot.bus.motors.keys())
     action_dict = {f"{name}.pos": float(action[i]) for i, name in enumerate(motor_names)}
-    robot.send_action(action_dict)
+    
+    if debug:
+        # Get current position for comparison
+        current_state = get_robot_state(robot)
+        print(f"  Current state: {current_state}")
+        print(f"  Requested action: {action}")
+        print(f"  Diff: {action - current_state}")
+    
+    sent_action = robot.send_action(action_dict)
+    
+    if debug:
+        print(f"  Sent action: {list(sent_action.values())}")
+    
+    return sent_action
 
 
 # =============================================================================
@@ -168,12 +209,21 @@ def make_observation(
     caps: dict,
     image_hw: tuple[int, int],
     robot: SO101Follower,
+    task: str,
 ) -> dict:
     """
     Build observation dict from cameras and robot state.
     
+    Args:
+        policy: The loaded policy (for dtype)
+        device: torch device
+        caps: Dictionary of camera captures
+        image_hw: Target (height, width) for images
+        robot: Connected robot instance
+        task: Task description for the VLA model
+    
     Returns:
-        Dictionary with image tensors and state tensor, ready for policy
+        Dictionary with image tensors, state tensor, and task, ready for policy
     """
     dtype = next(policy.parameters()).dtype
     
@@ -191,6 +241,7 @@ def make_observation(
         "observation.images.secondary_0": sec0_img,
         "observation.images.secondary_1": sec1_img,
         "observation.state": state_tensor,
+        "task": task,  # Pi0.5 needs task instruction
     }
 
 
@@ -204,8 +255,10 @@ def run_inference_loop(
     caps: dict,
     image_hw: tuple[int, int],
     robot: SO101Follower,
+    task: str,
     duration_s: float,
     fps: float,
+    action_scale: float | None = None,
 ) -> None:
     """
     Main control loop: observe -> predict -> execute.
@@ -216,6 +269,7 @@ def run_inference_loop(
         caps: Dictionary of camera captures
         image_hw: Target (height, width) for images
         robot: Connected SO101Follower instance
+        task: Task description for the VLA model
         duration_s: How long to run (seconds)
         fps: Target control frequency
     """
@@ -223,12 +277,27 @@ def run_inference_loop(
     start_time = time.time()
     step_count = 0
     
+    # Reset policy before starting (clears action queue)
+    if hasattr(policy, 'reset'):
+        policy.reset()
+        print("Policy reset.")
+    
     print(f"\n{'='*60}")
     print(f"Starting inference loop")
+    print(f"  Task: {task}")
     print(f"  Duration: {duration_s}s")
     print(f"  Target FPS: {fps}")
+    if action_scale is not None:
+        print(f"  Action scaling: {action_scale}x (manual override)")
+    else:
+        print(f"  Action scaling: Using policy's built-in unnormalization")
     print(f"  Press Ctrl+C to stop")
     print(f"{'='*60}\n")
+    
+    # Get initial state for debugging
+    initial_state = get_robot_state(robot)
+    print(f"Initial robot state: {initial_state}")
+    print()
     
     try:
         while (time.time() - start_time) < duration_s:
@@ -241,9 +310,8 @@ def run_inference_loop(
                 caps=caps,
                 image_hw=image_hw,
                 robot=robot,
+                task=task,
             )
-            
-            print(f"Observation: {observation}")
 
             # 2. Run policy inference
             with torch.no_grad():
@@ -255,10 +323,19 @@ def run_inference_loop(
             
             # 3. Execute action on robot
             action_np = action.cpu().numpy().flatten()
-
-            print(f"Action: {action_np}")
             
-            execute_action(robot, action_np)
+            # Apply manual action scaling if specified (workaround for missing stats)
+            if action_scale is not None:
+                action_np = action_np * action_scale
+            
+            # Debug: print state and action on first few steps
+            if step_count < 5:
+                print(f"\n--- Step {step_count} ---")
+                if action_scale is not None:
+                    print(f"  (Action scaled by {action_scale}x)")
+                execute_action(robot, action_np, debug=True)
+            else:
+                execute_action(robot, action_np, debug=False)
             
             step_count += 1
             
@@ -272,9 +349,11 @@ def run_inference_loop(
             if step_count % int(fps) == 0:  # Log every second
                 elapsed = time.time() - start_time
                 actual_hz = 1.0 / actual_dt if actual_dt > 0 else 0
+                current_state = get_robot_state(robot)
                 print(
                     f"Step {step_count:4d} | "
                     f"dt: {actual_dt*1000:5.1f}ms ({actual_hz:5.1f}Hz) | "
+                    f"state: {current_state} | "
                     f"Elapsed: {elapsed:5.1f}s / {duration_s}s"
                 )
     
@@ -324,6 +403,14 @@ def main():
         help="Safety limit for movement speed (lower = slower/safer)",
     )
     
+    # Task
+    parser.add_argument(
+        "--task",
+        type=str,
+        default=DEFAULT_TASK,
+        help="Task description for the VLA model",
+    )
+    
     # Control loop
     parser.add_argument(
         "--duration",
@@ -345,6 +432,15 @@ def main():
         default="cuda",
         choices=["cuda", "cpu"],
         help="Device to run inference on",
+    )
+    
+    # Action scaling (workaround when normalization stats are missing)
+    parser.add_argument(
+        "--action-scale",
+        type=float,
+        default=None,
+        help="Manual action scaling factor. If policy outputs [-1,1] and robot expects [-100,100], use 100. "
+             "Set to None to use policy's built-in unnormalization (requires stats in model).",
     )
     
     # Images
@@ -416,8 +512,10 @@ def main():
             caps=caps,
             image_hw=image_hw,
             robot=robot,
+            task=args.task,
             duration_s=args.duration,
             fps=args.fps,
+            action_scale=args.action_scale,
         )
     finally:
         # Cleanup
