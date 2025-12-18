@@ -384,17 +384,26 @@ def run_inference_loop(
                     # Get stats for action
                     stats = unnormalizer._tensor_stats.get('action', {})
                     if 'q01' in stats and 'q99' in stats:
-                        # Apply QUANTILES unnormalization: value * (q99 - q01) + q01
+                        # Policy outputs in [-1, 1] range
+                        # QUANTILES unnormalization: (x + 1) / 2 * (q99 - q01) + q01
+                        # This maps [-1, 1] -> [q01, q99]
                         q01 = stats['q01'].cpu().numpy()
                         q99 = stats['q99'].cpu().numpy()
-                        action_np = action_raw * (q99 - q01) + q01
-                        unnorm_method = "postprocessor (QUANTILES)"
+                        action_01 = (action_raw + 1.0) / 2.0  # [-1,1] -> [0,1]
+                        action_unnorm = action_01 * (q99 - q01) + q01  # [0,1] -> [q01,q99]
+                        
+                        # Stats are in radians, robot expects degrees
+                        # Convert: 1 radian = 57.2958 degrees
+                        action_np = action_unnorm * 57.2958
+                        unnorm_method = "postprocessor (QUANTILES [-1,1]->rad->deg)"
                     elif 'mean' in stats and 'std' in stats:
-                        # Apply MEAN_STD unnormalization: value * std + mean
+                        # MEAN_STD unnormalization: x * std + mean
                         mean = stats['mean'].cpu().numpy()
                         std = stats['std'].cpu().numpy()
-                        action_np = action_raw * std + mean
-                        unnorm_method = "postprocessor (MEAN_STD)"
+                        action_unnorm = action_raw * std + mean
+                        # Convert radians to degrees
+                        action_np = action_unnorm * 57.2958
+                        unnorm_method = "postprocessor (MEAN_STD + rad->deg)"
                     else:
                         action_np = action_raw
                         unnorm_method = f"postprocessor (no matching stats, keys={list(stats.keys())})"
