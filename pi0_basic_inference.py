@@ -21,6 +21,9 @@ import time
 import cv2
 import torch
 import numpy as np
+import threading
+from queue import Queue, Empty
+from collections import deque
 
 from lerobot.policies.factory import get_policy_class
 from lerobot.configs.policies import PreTrainedConfig
@@ -79,7 +82,7 @@ def load_postprocessor(checkpoint_path: str, device: str = "cuda"):
         return None
 
 
-def load_policy_from_checkpoint(checkpoint_path: str, device: str = "cuda"):
+def load_policy_from_checkpoint(checkpoint_path: str, device: str = "cuda", n_action_steps: int = None):
     """
     Load a pretrained Pi0.5 policy from checkpoint directory.
     
@@ -95,6 +98,11 @@ def load_policy_from_checkpoint(checkpoint_path: str, device: str = "cuda"):
     policy_config = PreTrainedConfig.from_pretrained(checkpoint_path)
     policy_config.pretrained_path = checkpoint_path
     policy_config.device = device
+    
+    # Override n_action_steps if specified
+    if n_action_steps is not None:
+        policy_config.n_action_steps = n_action_steps
+        print(f"  Overriding n_action_steps: {n_action_steps}")
 
     policy_cls = get_policy_class(policy_config.type)
     policy = policy_cls.from_pretrained(
@@ -290,6 +298,95 @@ def make_observation(
 
 
 # =============================================================================
+# ASYNC INFERENCE
+# =============================================================================
+
+class AsyncInferenceRunner:
+    """
+    Runs model inference in a background thread for smooth robot control.
+    
+    While executing current action chunk, the next chunk is being generated.
+    """
+    
+    def __init__(self, policy, device: str):
+        self.policy = policy
+        self.device = device
+        self.action_queue = deque()  # Actions ready to execute
+        self.pending_observation = None  # Observation waiting for inference
+        self.inference_thread = None
+        self.running = False
+        self.lock = threading.Lock()
+        self.chunk_count = 0
+        
+    def start(self):
+        """Start the async inference thread."""
+        self.running = True
+        self.inference_thread = threading.Thread(target=self._inference_loop, daemon=True)
+        self.inference_thread.start()
+        print("[ASYNC] Inference thread started")
+        
+    def stop(self):
+        """Stop the async inference thread."""
+        self.running = False
+        if self.inference_thread:
+            self.inference_thread.join(timeout=2.0)
+        print("[ASYNC] Inference thread stopped")
+        
+    def submit_observation(self, observation: dict):
+        """Submit an observation for inference (non-blocking)."""
+        with self.lock:
+            self.pending_observation = observation
+            
+    def get_action(self) -> np.ndarray | None:
+        """Get the next action (non-blocking). Returns None if no action available."""
+        with self.lock:
+            if len(self.action_queue) > 0:
+                return self.action_queue.popleft()
+            return None
+    
+    def queue_size(self) -> int:
+        """Return number of actions waiting in queue."""
+        with self.lock:
+            return len(self.action_queue)
+            
+    def _inference_loop(self):
+        """Background thread that runs inference when observations are available."""
+        while self.running:
+            # Check if we need more actions and have an observation
+            with self.lock:
+                need_actions = len(self.action_queue) < 10  # Start generating when queue gets low
+                obs = self.pending_observation if need_actions else None
+                if obs is not None:
+                    self.pending_observation = None
+                    
+            if obs is None:
+                time.sleep(0.01)  # Small sleep to avoid busy waiting
+                continue
+                
+            # Run inference
+            try:
+                t0 = time.time()
+                with torch.no_grad():
+                    with torch.amp.autocast('cuda', enabled=self.device.startswith("cuda"), dtype=torch.float16):
+                        action = self.policy.select_action(obs)
+                
+                inference_time = time.time() - t0
+                
+                # Add action to queue
+                with self.lock:
+                    action_np = action.cpu().numpy().flatten()
+                    self.action_queue.append(action_np)
+                    self.chunk_count += 1
+                    
+                if self.chunk_count % 10 == 0:
+                    print(f"[ASYNC] Queue: {len(self.action_queue)} actions, last inference: {inference_time*1000:.0f}ms")
+                    
+            except Exception as e:
+                print(f"[ASYNC] Inference error: {e}")
+                time.sleep(0.1)
+
+
+# =============================================================================
 # MAIN CONTROL LOOP
 # =============================================================================
 
@@ -304,6 +401,7 @@ def run_inference_loop(
     fps: float,
     action_scale: float | None = None,
     postprocessor=None,
+    async_inference: bool = False,
 ) -> None:
     """
     Main control loop: observe -> predict -> execute.
@@ -332,6 +430,7 @@ def run_inference_loop(
     print(f"  Task: {task}")
     print(f"  Duration: {duration_s}s")
     print(f"  Target FPS: {fps}")
+    print(f"  Async inference: {'✓ ENABLED' if async_inference else 'disabled'}")
     if postprocessor is not None:
         print(f"  Action unnormalization: ✓ Using postprocessor")
     elif action_scale is not None:
@@ -340,6 +439,12 @@ def run_inference_loop(
         print(f"  Action unnormalization: ⚠️  NONE - actions may be wrong scale!")
     print(f"  Press Ctrl+C to stop")
     print(f"{'='*60}\n")
+    
+    # Setup async inference if enabled
+    async_runner = None
+    if async_inference:
+        async_runner = AsyncInferenceRunner(policy, device)
+        async_runner.start()
     
     # Get initial state for debugging
     initial_state = get_robot_state(robot)
@@ -360,16 +465,22 @@ def run_inference_loop(
                 task=task,
             )
 
-            # 2. Run policy inference
-            with torch.no_grad():
-                with torch.cuda.amp.autocast(
-                    enabled=device.startswith("cuda"),
-                    dtype=torch.float16
-                ):
-                    action = policy.select_action(observation)
-            
-            # 3. Process and execute action on robot
-            action_raw = action.cpu().numpy().flatten()
+            # 2. Run policy inference (sync or async)
+            if async_runner is not None:
+                # Async mode: submit observation, get action from queue
+                async_runner.submit_observation(observation)
+                action_raw = async_runner.get_action()
+                
+                if action_raw is None:
+                    # No action ready yet, wait a bit
+                    time.sleep(0.01)
+                    continue
+            else:
+                # Sync mode: blocking inference
+                with torch.no_grad():
+                    with torch.amp.autocast('cuda', enabled=device.startswith("cuda"), dtype=torch.float16):
+                        action = policy.select_action(observation)
+                action_raw = action.cpu().numpy().flatten()
             
             # Apply unnormalization via postprocessor if available
             if postprocessor is not None:
@@ -453,6 +564,10 @@ def run_inference_loop(
         print("\n\nInference interrupted by user (Ctrl+C)")
     
     finally:
+        # Stop async runner if enabled
+        if async_runner is not None:
+            async_runner.stop()
+            
         elapsed = time.time() - start_time
         avg_hz = step_count / elapsed if elapsed > 0 else 0
         print(f"\n{'='*60}")
@@ -535,6 +650,23 @@ def main():
              "Set to None to use policy's built-in unnormalization (requires stats in model).",
     )
     
+    # Action chunking
+    parser.add_argument(
+        "--n-action-steps",
+        type=int,
+        default=None,
+        help="Number of actions per chunk. Default is 50. Lower = more frequent inference, smoother but slower. "
+             "Higher = less frequent inference, faster but jerkier during chunk transitions.",
+    )
+    
+    # Async inference
+    parser.add_argument(
+        "--async",
+        dest="async_inference",
+        action="store_true",
+        help="Enable async inference (run model in background thread for smoother motion)",
+    )
+    
     # Images
     parser.add_argument(
         "--image-height",
@@ -579,7 +711,11 @@ def main():
     print("="*60)
     
     # Load policy
-    policy = load_policy_from_checkpoint(args.checkpoint, device=args.device)
+    policy = load_policy_from_checkpoint(
+        args.checkpoint, 
+        device=args.device,
+        n_action_steps=args.n_action_steps
+    )
     
     # Load postprocessor (contains unnormalization stats)
     print("\nLoading postprocessor...")
@@ -613,6 +749,7 @@ def main():
             fps=args.fps,
             action_scale=args.action_scale,
             postprocessor=postprocessor,
+            async_inference=args.async_inference,
         )
     finally:
         # Cleanup

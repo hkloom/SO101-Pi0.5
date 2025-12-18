@@ -1199,7 +1199,11 @@ class PI05OpenPIPolicy(PreTrainedPolicy):
 
         # Action queue logic for n_action_steps > 1
         if len(self._action_queue) == 0:
+            import time
+            t0 = time.time()
             actions = self.predict_action_chunk(batch)[:, : self.config.n_action_steps]
+            inference_time = time.time() - t0
+            print(f"[CHUNK] Generated {actions.shape[1]} actions in {inference_time:.2f}s")
             # Transpose to get shape (n_action_steps, batch_size, action_dim)
             self._action_queue.extend(actions.transpose(0, 1))
 
