@@ -956,6 +956,15 @@ class PI05OpenPIPolicy(PreTrainedPolicy):
 
             print(f"Total keys remapped: {remap_count}")
 
+            # Fix weight tying: PaliGemma ties embed_tokens with lm_head
+            # During fine-tuning, only lm_head may be saved, so we need to copy it to embed_tokens
+            embed_tokens_key = "model.paligemma_with_expert.paligemma.model.language_model.embed_tokens.weight"
+            lm_head_key = "model.paligemma_with_expert.paligemma.lm_head.weight"
+            
+            if embed_tokens_key not in remapped_state_dict and lm_head_key in remapped_state_dict:
+                print(f"Fixing weight tying: copying {lm_head_key} -> {embed_tokens_key}")
+                remapped_state_dict[embed_tokens_key] = remapped_state_dict[lm_head_key]
+
             # Load the remapped state dict into the model
             missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
 
