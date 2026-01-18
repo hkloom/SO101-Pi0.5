@@ -620,7 +620,7 @@ def main():
     parser.add_argument(
         "--max-relative-target",
         type=float,
-        default=10.0,
+        default=3.8,
         help="Safety limit for movement speed (lower = slower/safer)",
     )
     
