@@ -24,17 +24,18 @@ Now:
        Make sure model.safetensors contains 'unnormalize_outputs.*' keys.
     ⚠️  WARNING: No normalization stats loaded for inputs!
 
-
-
-Change:
+==========================================================================================================================================
 
 ## 1.17.2026
 
 - Ran inference on PIv3 -- trained on 42 trajectories 
 - Robot stood up, moved forward towards the lego, and opened the gripper.
+- Played around with
+  - `chunk_size` (config.json > line 55)
+  - `n_action_steps` (config.json > line 56)
+  - `--max-relative-target` (pi0_basic_inference > line 623)
 
-- Cursor says
-
+FROM LLM:
 ```text
 safetensors is installed. The file is indeed corrupt:
   Error while deserializing header: incomplete metadata, file not fully covered
@@ -42,7 +43,7 @@ safetensors is installed. The file is indeed corrupt:
   "So ./pi05_fixed/model.safetensors is truncated. You’ll need to replace it with a complete copy of the checkpoint (and ensure any postprocessor stats files are present). Once you have a good file, re-run the same check; it should list tensor keys instead of erroring."
 
   Tensor Check:
-  
+
     cd /home/aiclub/dev/SO101-Pi0.5 && python -m pip install safetensors && python - <<'PY'
     from safetensors import safe_open
     path = './pi05_fixed/model.safetensors'
@@ -51,4 +52,7 @@ safetensors is installed. The file is indeed corrupt:
     PY
 ```
 
+NEXT
+- Make sure camera/image resolution is correct when recording, training, and inferencing (go for 224x224 or 448x448) 
+- Record a solid 50-100 trajectory dataset with proper camera configuration, and cable not in the way, and no needed edits after
 
