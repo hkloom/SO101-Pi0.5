@@ -184,7 +184,7 @@ def get_frame(cap: cv2.VideoCapture, target_hw: tuple[int, int]) -> torch.Tensor
 # ROBOT FUNCTIONS
 # =============================================================================
 
-def connect_robot(port: str, max_relative_target: float = 0.05) -> SO101Follower:
+def connect_robot(port: str, max_relative_target: float = 100) -> SO101Follower:
     """
     Connect to the SO-101 robot arm.
     
@@ -201,6 +201,7 @@ def connect_robot(port: str, max_relative_target: float = 0.05) -> SO101Follower
         port=port,
         id="so101_follower",
         max_relative_target=max_relative_target,
+        use_degrees=True,
     )
     
     robot = SO101Follower(config)
@@ -208,6 +209,7 @@ def connect_robot(port: str, max_relative_target: float = 0.05) -> SO101Follower
     
     print(f"  Robot connected!")
     print(f"  Motors: {list(robot.bus.motors.keys())}")
+    print(f"  use_degrees={config.use_degrees}, max_relative_target={config.max_relative_target}")
     
     return robot
 
@@ -618,7 +620,7 @@ def main():
     parser.add_argument(
         "--max-relative-target",
         type=float,
-        default=0.05,
+        default=10.0,
         help="Safety limit for movement speed (lower = slower/safer)",
     )
     
