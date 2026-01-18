@@ -9,7 +9,7 @@ This script runs Pi0.5 policy inference with:
 - Task/language instruction for the VLA model
 
 Usage:
-    python pi0_basic_inference.py --checkpoint ./pi05_fixed --task "Pick up the red lego" --duration 60
+    python pi0_basic_inference.py --checkpoint ./pi05_fixed --task "Pick up the red lego." --duration 60
 
 Hardware Setup:
     - Robot: SO-101 follower arm on /dev/ttyACM0
@@ -95,7 +95,12 @@ def load_policy_from_checkpoint(checkpoint_path: str, device: str = "cuda", n_ac
     """
     print(f"Loading policy from {checkpoint_path}...")
     
+
+    #  HERE?
+    # from_pretrained orig_config = draccus.parse(cls, config_file, args=[])
     policy_config = PreTrainedConfig.from_pretrained(checkpoint_path)
+
+
     policy_config.pretrained_path = checkpoint_path
     policy_config.device = device
     
@@ -233,8 +238,11 @@ def execute_action(robot: SO101Follower, action: np.ndarray, debug: bool = False
     Returns:
         The action dict that was actually sent (may be clipped)
     """
+    print("INSIDE execute_action")
     motor_names = list(robot.bus.motors.keys())
     action_dict = {f"{name}.pos": float(action[i]) for i, name in enumerate(motor_names)}
+    print("action_dict: ", action_dict)
+
     
     if debug:
         # Get current position for comparison
@@ -243,7 +251,9 @@ def execute_action(robot: SO101Follower, action: np.ndarray, debug: bool = False
         print(f"  Requested action: {action}")
         print(f"  Diff: {action - current_state}")
     
+    print("CALLING send_action")
     sent_action = robot.send_action(action_dict)
+    print("send_action returned")
     
     if debug:
         print(f"  Sent action: {list(sent_action.values())}")
@@ -536,8 +546,10 @@ def run_inference_loop(
                 print(f"  Unnormalization: {unnorm_method}")
                 print(f"  Raw action: {action_raw}")
                 print(f"  Processed action: {action_np}")
+                print("CALLING execute_action")
                 execute_action(robot, action_np, debug=True)
             else:
+                print("CALLING execute_action")
                 execute_action(robot, action_np, debug=False)
             
             step_count += 1

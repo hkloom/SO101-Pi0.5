@@ -203,20 +203,27 @@ class SO101Follower(Robot):
         Returns:
             the action sent to the motors, potentially clipped.
         """
+        print("INSIDE send_action")
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
-
+        print("send_action 1")
         goal_pos = {key.removesuffix(".pos"): val for key, val in action.items() if key.endswith(".pos")}
 
         # Cap goal position when too far away from present position.
         # /!\ Slower fps expected due to reading from the follower.
+        print("send_action 2")
         if self.config.max_relative_target is not None:
+            print("send_action 2.1")
             present_pos = self.bus.sync_read("Present_Position")
+            print("send_action 2.2")
             goal_present_pos = {key: (g_pos, present_pos[key]) for key, g_pos in goal_pos.items()}
+            print("send_action 2.3")
             goal_pos = ensure_safe_goal_position(goal_present_pos, self.config.max_relative_target)
 
         # Send goal position to the arm
+        print("send_action 3")
         self.bus.sync_write("Goal_Position", goal_pos)
+        print("send_action 4")
         return {f"{motor}.pos": val for motor, val in goal_pos.items()}
 
     def disconnect(self):
