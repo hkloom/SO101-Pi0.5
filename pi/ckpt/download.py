@@ -21,10 +21,10 @@ from pathlib import Path
 CHECKPOINT_FILES = [
     "config.json",
     "model.safetensors",
-    "policy_preprocessor.json",
-    "policy_postprocessor.json",
-    "policy_preprocessor_step_2_normalizer_processor.safetensors",
-    "policy_postprocessor_step_0_unnormalizer_processor.safetensors",
+    "policy_preprocessor.json", # defines how to normalize inputs
+    "policy_postprocessor.json", # defines how to denormalize outputs
+    "policy_preprocessor_step_2_normalizer_processor.safetensors", # normalization stats for inputs
+    "policy_postprocessor_step_0_unnormalizer_processor.safetensors", # denormalization stats for outputs
 ]
 
 

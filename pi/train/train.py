@@ -2,6 +2,29 @@
 """
 PI 0.5 Training Script for Lambda Cloud
 Trains on dataset converted to the new v3.0 quantile format
+
+When you run this script it will build and run the following command:
+
+lerobot-train \
+    --dataset.repo_id=bdhillon/PI-01.07.26-v3-quantiles \
+    --dataset.root=/home/ubuntu/lerobot-training/dataset \
+    --policy.type=pi05 \
+    --policy.pretrained_path=lerobot/pi05_base \
+    --policy.repo_id=bdhillon/PIv3 \
+    --policy.push_to_hub=true \
+    --policy.normalization_mapping={"ACTION": "QUANTILES", "STATE": "QUANTILES", "VISUAL": "NONE"} \
+    --policy.compile_model=true \
+    --policy.gradient_checkpointing=true \
+    --policy.dtype=bfloat16 \
+    --batch_size=8 \
+    --steps=7350 \
+    --eval_freq=500 \
+    --log_freq=100 \
+    --save_freq=500 \
+    --eval.n_episodes=5 \
+    --eval.batch_size=5 \
+    --output_dir=./PIv3 \
+    --wandb.enable=true
 """
 
 import subprocess
@@ -13,11 +36,9 @@ import os
 # =========================================================================== #
 
 CONFIG = {
-    # Dataset (pre-converted v3.0 format)
+    # Dataset (pre-converted v3.0 format with quantile stats)
     "dataset_repo_id": "bdhillon/PI-01.07.26-v3-quantiles",
     "dataset_root": os.path.expanduser("~/lerobot-training/dataset"),
-    # uncomment this line if using a local dataset instead of a dataset from HF
-    # "dataset_root": os.path.expanduser("~/lerobot-training/dataset/PI-0.5-11.19.2025-v3-quantiles"),
 
     # Model
     "policy_type": "pi05",
@@ -27,18 +48,30 @@ CONFIG = {
     "repo_id": "bdhillon/PIv3",
     "push_to_hub": True,
 
+    # This tells LeRobot how to normalize inputs and denormalize outputs.
+    # The stats will be saved with the checkpoint for use during inference.
+    #
+    # Options:
+    #   - For datasets WITH quantile stats:  {"ACTION": "QUANTILES", "STATE": "QUANTILES", "VISUAL": "NONE"}
+    #   - For datasets WITHOUT quantile stats: {"ACTION": "MEAN_STD", "STATE": "MEAN_STD", "VISUAL": "IDENTITY"}
+    # ==========================================================================
+    "normalization_mapping": '{"ACTION": "QUANTILES", "STATE": "QUANTILES", "VISUAL": "NONE"}',
+
     # Training hyperparameters
     "batch_size": 8,
-    "policy.dtype": "bfloat16",
-    "policy.use_amp": True,
     "steps": 7350,
     "eval_freq": 500,
     "log_freq": 100,
     "save_freq": 500,
 
+    # Policy settings
+    "compile_model": True,
+    "gradient_checkpointing": True,
+    "dtype": "bfloat16",
+
     # Evaluation settings
     "eval_n_episodes": 5,
-    "eval_batch_size": 5,    # Must be <= eval_n_episodes
+    "eval_batch_size": 5,
 
     # Output
     "output_dir": "./PIv3",
@@ -56,15 +89,27 @@ def build_command(config):
 
     cmd = ["lerobot-train"]
 
+    # Dataset settings
+    cmd.append(f"--dataset.repo_id={config['dataset_repo_id']}")
+    cmd.append(f"--dataset.root={config['dataset_root']}")
+
     # Policy settings
     cmd.append(f"--policy.type={config['policy_type']}")
     cmd.append(f"--policy.pretrained_path={config['pretrained_path']}")
     cmd.append(f"--policy.repo_id={config['repo_id']}")
     cmd.append(f"--policy.push_to_hub={'true' if config['push_to_hub'] else 'false'}")
 
-    # Dataset settings
-    cmd.append(f"--dataset.repo_id={config['dataset_repo_id']}")
-    cmd.append(f"--dataset.root={config['dataset_root']}")
+    # Normalization mapping
+    if 'normalization_mapping' in config:
+        cmd.append(f"--policy.normalization_mapping={config['normalization_mapping']}")
+
+    # Policy optimization settings
+    if config.get('compile_model'):
+        cmd.append("--policy.compile_model=true")
+    if config.get('gradient_checkpointing'):
+        cmd.append("--policy.gradient_checkpointing=true")
+    if config.get('dtype'):
+        cmd.append(f"--policy.dtype={config['dtype']}")
 
     # Training hyperparameters
     cmd.append(f"--batch_size={config['batch_size']}")
@@ -136,4 +181,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
